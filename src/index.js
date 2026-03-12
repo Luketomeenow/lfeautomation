@@ -162,6 +162,43 @@ app.get('/ghl/test', (_req, res) => {
     });
 });
 
+/** Send a test embed to all three opportunity channels: no show, follow up, closed deal */
+app.get('/ghl/opportunity/test', async (_req, res) => {
+  const stages = [
+    { key: 'no_show', env: 'DISCORD_WEBHOOK_NO_SHOW' },
+    { key: 'follow_up', env: 'DISCORD_WEBHOOK_FOLLOW_UP' },
+    { key: 'closed_deal', env: 'DISCORD_WEBHOOK_CLOSED_DEAL' },
+  ];
+
+  const testBody = {
+    contact: { firstName: 'Test', lastName: 'User', email: 'test@example.com', phone: '555-0000' },
+    stage: 'Test',
+  };
+
+  const results = {};
+  for (const { key, env } of stages) {
+    const webhookUrl = (process.env[env] || '').trim();
+    if (!webhookUrl) {
+      results[key] = { success: false, error: `${env} not set` };
+      continue;
+    }
+    try {
+      const embed = buildGhlOpportunityEmbed(key, { ...testBody, stage: key });
+      embed.title = `🧪 Test – ${embed.title}`;
+      await sendEmbed(webhookUrl, embed);
+      results[key] = { success: true };
+    } catch (err) {
+      results[key] = { success: false, error: err.message };
+    }
+  }
+
+  const allOk = stages.every((s) => results[s.key]?.success);
+  res.status(allOk ? 200 : 207).json({
+    message: allOk ? 'Test sent to all opportunity channels' : 'Some channels failed',
+    results,
+  });
+});
+
 async function initState(savedState) {
   console.log('Initialising row counts for each form...');
   const activeForms = FORMS.filter((f) => f.sheetId && f.webhookUrl);
