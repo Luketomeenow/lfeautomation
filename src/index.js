@@ -6,6 +6,7 @@ const { buildEmbed } = require('./formatters');
 const { parsePayload, buildLeadFromParsed } = require('./typeform');
 const { buildNewLeadEmbed } = require('./typeformFormatter');
 const { buildGhlBookedCallEmbed, buildGhlWorkflowEmbed, buildGhlOpportunityEmbed } = require('./ghlFormatter');
+const { buildWhopPaymentEmbed } = require('./whopFormatter');
 const state = require('./state');
 
 const app = express();
@@ -197,6 +198,68 @@ app.get('/ghl/opportunity/test', async (_req, res) => {
     message: allOk ? 'Test sent to all opportunity channels' : 'Some channels failed',
     results,
   });
+});
+
+// —— WHOP payment/refund/dispute reports to Discord ——
+function getWhopEventAndData(body) {
+  const b = body || {};
+  const event = b.event ?? b.type ?? b.event_type ?? b.name ?? '';
+  const data = b.data ?? b.payload ?? b.object ?? b;
+  return { event: String(event).trim(), data };
+}
+
+app.post('/whop/webhook', (req, res) => {
+  const webhookUrl = (process.env.DISCORD_WEBHOOK_WHOP || '').trim();
+  if (!webhookUrl) {
+    console.error('[WHOP] DISCORD_WEBHOOK_WHOP not set');
+    res.status(200).json({ success: false, error: 'WHOP report webhook not configured' });
+    return;
+  }
+
+  const { event, data } = getWhopEventAndData(req.body);
+  if (!event) {
+    res.status(400).json({ success: false, error: 'Missing event type (event / type / event_type)' });
+    return;
+  }
+
+  const embed = buildWhopPaymentEmbed(event, data);
+
+  sendEmbed(webhookUrl, embed)
+    .then(() => {
+      console.log(`[WHOP] Report sent to Discord: ${event}`);
+      res.status(200).json({ success: true });
+    })
+    .catch((err) => {
+      console.error('[WHOP] Discord webhook failed:', err.message);
+      res.status(200).json({ success: false, error: err.message });
+    });
+});
+
+app.get('/whop/test', (_req, res) => {
+  const webhookUrl = (process.env.DISCORD_WEBHOOK_WHOP || '').trim();
+  if (!webhookUrl) {
+    res.json({ error: 'DISCORD_WEBHOOK_WHOP not set' });
+    return;
+  }
+
+  const testData = {
+    amount: 4900,
+    currency: 'USD',
+    status: 'payment.succeeded',
+    user: { username: 'Test User', email: 'test@example.com' },
+    product: { name: 'Test Product', plan_name: 'Monthly' },
+    id: 'test_whop_123',
+  };
+  const embed = buildWhopPaymentEmbed('payment.succeeded', testData);
+  embed.title = `🧪 Test – ${embed.title}`;
+
+  sendEmbed(webhookUrl, embed)
+    .then(() => {
+      res.json({ success: true, message: 'Test WHOP report sent to Discord' });
+    })
+    .catch((err) => {
+      res.json({ success: false, error: err.message });
+    });
 });
 
 async function initState(savedState) {
