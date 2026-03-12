@@ -1,0 +1,17 @@
+{
+  "name": "bsm-discord-automation",
+  "version": "1.0.0",
+  "description": "Polls Google Sheets (linked to Google Forms) and posts new submissions to Discord channels",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "googleapis": "^144.0.0"
+  }
+}
