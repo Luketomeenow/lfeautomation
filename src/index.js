@@ -7,10 +7,54 @@ const { parsePayload, buildLeadFromParsed } = require('./typeform');
 const { buildNewLeadEmbed } = require('./typeformFormatter');
 const { buildGhlBookedCallEmbed, buildGhlWorkflowEmbed, buildGhlOpportunityEmbed } = require('./ghlFormatter');
 const { buildWhopPaymentEmbed } = require('./whopFormatter');
+const { buildStripePaymentEmbed } = require('./stripeFormatter');
 const state = require('./state');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Stripe webhook needs raw body for signature verification; register before express.json()
+app.post('/stripe/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  const webhookUrl = (process.env.DISCORD_WEBHOOK_NEW_PAYMENTS || '').trim();
+  if (!webhookUrl) {
+    console.error('[Stripe] DISCORD_WEBHOOK_NEW_PAYMENTS not set');
+    res.status(200).json({ received: true, error: 'New payments webhook not configured' });
+    return;
+  }
+
+  const rawBody = req.body;
+  const sig = req.headers['stripe-signature'];
+  const secret = (process.env.STRIPE_WEBHOOK_SECRET || '').trim();
+
+  let event;
+  try {
+    if (secret && sig) {
+      const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || 'sk_dummy');
+      event = stripe.webhooks.constructEvent(rawBody, sig, secret);
+    } else {
+      event = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;
+    }
+  } catch (err) {
+    console.error('[Stripe] Webhook parse/verify error:', err.message);
+    res.status(400).json({ received: false, error: err.message });
+    return;
+  }
+
+  const eventType = event.type || '';
+  const obj = event.data?.object || {};
+
+  const embed = buildStripePaymentEmbed(eventType, obj);
+
+  sendEmbed(webhookUrl, embed)
+    .then(() => {
+      console.log(`[Stripe] Report sent to Discord: ${eventType}`);
+      res.status(200).json({ received: true });
+    })
+    .catch((err) => {
+      console.error('[Stripe] Discord webhook failed:', err.message);
+      res.status(200).json({ received: true, error: err.message });
+    });
+});
 
 app.use(express.json());
 
@@ -256,6 +300,32 @@ app.get('/whop/test', (_req, res) => {
   sendEmbed(webhookUrl, embed)
     .then(() => {
       res.json({ success: true, message: 'Test WHOP report sent to Discord' });
+    })
+    .catch((err) => {
+      res.json({ success: false, error: err.message });
+    });
+});
+
+// —— Stripe: test embed to #new-payments ——
+app.get('/stripe/test', (_req, res) => {
+  const webhookUrl = (process.env.DISCORD_WEBHOOK_NEW_PAYMENTS || '').trim();
+  if (!webhookUrl) {
+    res.json({ error: 'DISCORD_WEBHOOK_NEW_PAYMENTS not set' });
+    return;
+  }
+  const testObj = {
+    amount: 4900,
+    currency: 'usd',
+    status: 'succeeded',
+    id: 'pi_test_123',
+    receipt_email: 'test@example.com',
+    description: 'Test payment',
+  };
+  const embed = buildStripePaymentEmbed('payment_intent.succeeded', testObj);
+  embed.title = `🧪 Test – ${embed.title}`;
+  sendEmbed(webhookUrl, embed)
+    .then(() => {
+      res.json({ success: true, message: 'Test Stripe report sent to #new-payments' });
     })
     .catch((err) => {
       res.json({ success: false, error: err.message });
