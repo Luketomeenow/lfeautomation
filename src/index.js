@@ -8,7 +8,18 @@ const { buildNewLeadEmbed } = require('./typeformFormatter');
 const { buildGhlBookedCallEmbed, buildGhlWorkflowEmbed, buildGhlOpportunityEmbed } = require('./ghlFormatter');
 const { buildWhopPaymentEmbed } = require('./whopFormatter');
 const { buildStripePaymentEmbed } = require('./stripeFormatter');
+const { appendRows } = require('./sheets');
+const { buildWhopRevenueRow, buildStripeRevenueRow } = require('./revenueSheet');
 const state = require('./state');
+
+function appendToRevenueSheet(row) {
+  const sheetId = (process.env.REVENUE_SHEET_ID || '').trim();
+  if (!sheetId || !row || !Array.isArray(row)) return Promise.resolve();
+  const sheetName = (process.env.REVENUE_SHEET_NAME || '').trim() || 'Revenue';
+  return appendRows(sheetId, sheetName, [row])
+    .then(() => console.log('[Revenue] Row appended to', sheetName))
+    .catch((err) => console.error('[Revenue] Append failed:', err.message));
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -48,6 +59,7 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), (req, res
   sendEmbed(webhookUrl, embed)
     .then(() => {
       console.log(`[Stripe] Report sent to Discord: ${eventType}`);
+      appendToRevenueSheet(buildStripeRevenueRow(eventType, obj));
       res.status(200).json({ received: true });
     })
     .catch((err) => {
@@ -142,20 +154,40 @@ const OPPORTUNITY_WEBHOOKS = {
 };
 
 function normalizePipelineStage(value) {
-  const v = (value || '').toLowerCase().replace(/[\s-]/g, '_');
-  if (v.includes('no_show') || v.includes('noshow')) return 'no_show';
-  if (v.includes('follow') || v.includes('followup')) return 'follow_up';
-  if (v.includes('closed') || v.includes('deal')) return 'closed_deal';
+  if (value == null || value === '') return null;
+  const v = String(value).toLowerCase().replace(/[\s-]/g, '_');
+  if (v.includes('no_show') || v.includes('noshow') || v === 'no_show') return 'no_show';
+  if (v.includes('follow') || v.includes('followup') || v === 'follow_up') return 'follow_up';
+  if (v.includes('closed') || v.includes('deal') || v === 'closed_deal') return 'closed_deal';
   return null;
+}
+
+function getOpportunityStage(body) {
+  const b = body || {};
+  const opportunity = b.opportunity || {};
+  const custom = b.customData || b.custom_data || {};
+  return (
+    b.stage ??
+    b.stageName ??
+    b.pipelineStage ??
+    b.status ??
+    b.pipeline_stage ??
+    opportunity.stageName ??
+    opportunity.stage ??
+    opportunity.status ??
+    custom.stage ??
+    custom.stageName ??
+    ''
+  );
 }
 
 app.post('/ghl/opportunity', (req, res) => {
   const body = req.body || {};
-  const stageRaw = body.stage ?? body.stageName ?? body.pipelineStage ?? body.status ?? body.pipeline_stage ?? '';
+  const stageRaw = getOpportunityStage(body);
   const stageKey = normalizePipelineStage(stageRaw);
 
   if (!stageKey || !OPPORTUNITY_WEBHOOKS[stageKey]) {
-    console.error('[GHL Opportunity] Unknown or missing stage:', stageRaw);
+    console.error('[GHL Opportunity] Unknown or missing stage:', stageRaw, '| body keys:', Object.keys(body).join(', '));
     res.status(200).json({ success: false, error: 'Unknown stage. Use: no_show, follow_up, or closed_deal' });
     return;
   }
@@ -271,6 +303,7 @@ app.post('/whop/webhook', (req, res) => {
   sendEmbed(webhookUrl, embed)
     .then(() => {
       console.log(`[WHOP] Report sent to Discord: ${event}`);
+      appendToRevenueSheet(buildWhopRevenueRow(event, data));
       res.status(200).json({ success: true });
     })
     .catch((err) => {

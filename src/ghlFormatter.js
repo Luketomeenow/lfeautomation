@@ -102,12 +102,15 @@ function buildGhlOpportunityEmbed(stageKey, body) {
 
   const fields = [
     { name: 'Stage', value: stage.label, inline: true },
-    { name: 'Name', value: name, inline: true },
-    { name: 'Email', value: email, inline: true },
-    { name: 'Phone', value: phone, inline: true },
+    { name: 'Name', value: String(name).slice(0, 1024) || '—', inline: true },
+    { name: 'Email', value: String(email).slice(0, 1024) || '—', inline: true },
+    { name: 'Phone', value: String(phone).slice(0, 1024) || '—', inline: true },
   ];
 
-  const skip = new Set(['contact', 'stage', 'stageName', 'pipelineStage', 'status', 'firstName', 'lastName', 'name', 'fullName', 'email', 'phone', 'phoneNumber']);
+  const skip = new Set([
+    'contact', 'opportunity', 'stage', 'stageName', 'pipelineStage', 'pipeline_stage', 'pipelineStageId', 'status',
+    'firstName', 'lastName', 'name', 'fullName', 'email', 'phone', 'phoneNumber', 'customData', 'custom_data',
+  ]);
   for (const [key, value] of Object.entries(body)) {
     if (skip.has(key) || value == null || typeof value === 'object') continue;
     const str = String(value).trim();
