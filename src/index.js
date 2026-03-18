@@ -24,15 +24,14 @@ function appendToRevenueSheet(row) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const STRIPE_FAILURE_EVENTS = new Set([
+  'payment_intent.payment_failed',
+  'charge.failed',
+  'invoice.payment_failed',
+]);
+
 // Stripe webhook needs raw body for signature verification; register before express.json()
 app.post('/stripe/webhook', express.raw({ type: 'application/json' }), (req, res) => {
-  const webhookUrl = (process.env.DISCORD_WEBHOOK_NEW_PAYMENTS || '').trim();
-  if (!webhookUrl) {
-    console.error('[Stripe] DISCORD_WEBHOOK_NEW_PAYMENTS not set');
-    res.status(200).json({ received: true, error: 'New payments webhook not configured' });
-    return;
-  }
-
   const rawBody = req.body;
   const sig = req.headers['stripe-signature'];
   const secret = (process.env.STRIPE_WEBHOOK_SECRET || '').trim();
@@ -53,6 +52,21 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), (req, res
 
   const eventType = event.type || '';
   const obj = event.data?.object || {};
+  const stripeFailed = STRIPE_FAILURE_EVENTS.has(eventType);
+  const webhookUrl = (
+    stripeFailed ? process.env.DISCORD_WEBHOOK_FAILED_PAYMENTS : process.env.DISCORD_WEBHOOK_NEW_PAYMENTS
+  ).trim();
+
+  if (!webhookUrl) {
+    console.error(
+      stripeFailed ? '[Stripe] DISCORD_WEBHOOK_FAILED_PAYMENTS not set' : '[Stripe] DISCORD_WEBHOOK_NEW_PAYMENTS not set',
+    );
+    res.status(200).json({
+      received: true,
+      error: stripeFailed ? 'Failed-payments webhook not configured' : 'New payments webhook not configured',
+    });
+    return;
+  }
 
   const embed = buildStripePaymentEmbed(eventType, obj);
 
@@ -285,16 +299,27 @@ function getWhopEventAndData(body) {
 }
 
 app.post('/whop/webhook', (req, res) => {
-  const webhookUrl = (process.env.DISCORD_WEBHOOK_WHOP || '').trim();
-  if (!webhookUrl) {
-    console.error('[WHOP] DISCORD_WEBHOOK_WHOP not set');
-    res.status(200).json({ success: false, error: 'WHOP report webhook not configured' });
-    return;
-  }
-
   const { event, data } = getWhopEventAndData(req.body);
   if (!event) {
     res.status(400).json({ success: false, error: 'Missing event type (event / type / event_type)' });
+    return;
+  }
+
+  const whopFailed = event === 'payment.failed';
+  const webhookUrl = (
+    whopFailed ? process.env.DISCORD_WEBHOOK_FAILED_PAYMENTS : process.env.DISCORD_WEBHOOK_WHOP
+  ).trim();
+
+  if (!webhookUrl) {
+    console.error(
+      whopFailed ? '[WHOP] DISCORD_WEBHOOK_FAILED_PAYMENTS not set' : '[WHOP] DISCORD_WEBHOOK_WHOP not set',
+    );
+    res.status(200).json({
+      success: false,
+      error: whopFailed
+        ? 'Failed-payments webhook not configured (set DISCORD_WEBHOOK_FAILED_PAYMENTS)'
+        : 'WHOP report webhook not configured',
+    });
     return;
   }
 
@@ -339,6 +364,27 @@ app.get('/whop/test', (_req, res) => {
     });
 });
 
+app.get('/whop/test-failed', (_req, res) => {
+  const webhookUrl = (process.env.DISCORD_WEBHOOK_FAILED_PAYMENTS || '').trim();
+  if (!webhookUrl) {
+    res.json({ error: 'DISCORD_WEBHOOK_FAILED_PAYMENTS not set' });
+    return;
+  }
+  const embed = buildWhopPaymentEmbed('payment.failed', {
+    amount: 50000,
+    currency: 'USD',
+    status: 'open',
+    user: { username: 'Test User', email: 'test@example.com' },
+    product: { name: 'Test Product' },
+    id: 'pay_test_failed',
+    failure_reason: 'Test failure',
+  });
+  embed.title = `🧪 Test – ${embed.title}`;
+  sendEmbed(webhookUrl, embed)
+    .then(() => res.json({ success: true, message: 'Test failed-payment embed sent to #failed-payments' }))
+    .catch((err) => res.json({ success: false, error: err.message }));
+});
+
 // —— Stripe: test embed to #new-payments ——
 app.get('/stripe/test', (_req, res) => {
   const webhookUrl = (process.env.DISCORD_WEBHOOK_NEW_PAYMENTS || '').trim();
@@ -363,6 +409,26 @@ app.get('/stripe/test', (_req, res) => {
     .catch((err) => {
       res.json({ success: false, error: err.message });
     });
+});
+
+app.get('/stripe/test-failed', (_req, res) => {
+  const webhookUrl = (process.env.DISCORD_WEBHOOK_FAILED_PAYMENTS || '').trim();
+  if (!webhookUrl) {
+    res.json({ error: 'DISCORD_WEBHOOK_FAILED_PAYMENTS not set' });
+    return;
+  }
+  const embed = buildStripePaymentEmbed('payment_intent.payment_failed', {
+    amount: 5000,
+    currency: 'usd',
+    status: 'requires_payment_method',
+    id: 'pi_test_failed',
+    receipt_email: 'test@example.com',
+    last_payment_error: { message: 'Your card was declined.' },
+  });
+  embed.title = `🧪 Test – ${embed.title}`;
+  sendEmbed(webhookUrl, embed)
+    .then(() => res.json({ success: true, message: 'Test Stripe failure sent to #failed-payments' }))
+    .catch((err) => res.json({ success: false, error: err.message }));
 });
 
 async function initState(savedState) {
