@@ -41,20 +41,34 @@ async function getNewRows(spreadsheetId, afterIndex) {
 }
 
 /**
- * Append one or more rows to a sheet. Range is the A1 notation for the sheet (e.g. "Revenue" or "Revenue!A:L").
- * Values should be an array of rows, each row an array of cell values.
+ * A1 range for a tab name (quotes if spaces, emoji, or special chars).
  */
-async function appendRows(spreadsheetId, rangeSheetOrA1, values) {
+function sheetRangeA1(sheetName, columnRange = 'A:L') {
+  if (sheetName.includes('!')) return sheetName; // already full A1
+  const escaped = String(sheetName).replace(/'/g, "''");
+  const needsQuote = /[^a-zA-Z0-9_]/.test(sheetName) || /^\d/.test(sheetName);
+  const tab = needsQuote ? `'${escaped}'` : escaped;
+  return `${tab}!${columnRange}`;
+}
+
+/**
+ * Append one or more rows to a sheet tab.
+ * Values: array of rows, each row an array of cell values.
+ */
+async function appendRows(spreadsheetId, sheetName, values) {
   if (!values || values.length === 0) return;
-  const range = rangeSheetOrA1.includes('!') ? rangeSheetOrA1 : `${rangeSheetOrA1}!A:ZZ`;
+  if (!spreadsheetId || !sheetName) {
+    throw new Error('appendRows: missing spreadsheetId or sheetName');
+  }
+  const range = sheetRangeA1(sheetName, 'A:L');
   const sheets = getClient();
-  await sheets.spreadsheets.values.append({
+  const res = await sheets.spreadsheets.values.append({
     spreadsheetId,
     range,
     valueInputOption: 'USER_ENTERED',
-    insertDataOption: 'INSERT_ROWS',
     requestBody: { values },
   });
+  return res.data;
 }
 
 module.exports = { getRows, getRowCount, getNewRows, appendRows };

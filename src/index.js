@@ -9,16 +9,29 @@ const { buildGhlBookedCallEmbed, buildGhlWorkflowEmbed, buildGhlOpportunityEmbed
 const { buildWhopPaymentEmbed } = require('./whopFormatter');
 const { buildStripePaymentEmbed } = require('./stripeFormatter');
 const { appendRows } = require('./sheets');
-const { buildWhopRevenueRow, buildStripeRevenueRow } = require('./revenueSheet');
+const { buildWhopRevenueRow, buildStripeRevenueRow, buildRevenueRow } = require('./revenueSheet');
 const state = require('./state');
 
 function appendToRevenueSheet(row) {
   const sheetId = (process.env.REVENUE_SHEET_ID || '').trim();
-  if (!sheetId || !row || !Array.isArray(row)) return Promise.resolve();
+  if (!sheetId) {
+    return Promise.resolve();
+  }
+  if (!row || !Array.isArray(row)) {
+    console.warn('[Revenue] Skip append: invalid row');
+    return Promise.resolve();
+  }
   const sheetName = (process.env.REVENUE_SHEET_NAME || '').trim() || 'Revenue';
   return appendRows(sheetId, sheetName, [row])
-    .then(() => console.log('[Revenue] Row appended to', sheetName))
-    .catch((err) => console.error('[Revenue] Append failed:', err.message));
+    .then(() => console.log('[Revenue] Row appended to tab', JSON.stringify(sheetName), 'spreadsheet', sheetId.slice(0, 8) + '…'))
+    .catch((err) => {
+      const detail = err.response?.data;
+      console.error(
+        '[Revenue] Google Sheets append failed:',
+        err.message,
+        detail ? JSON.stringify(detail) : '(check REVENUE_SHEET_ID, tab name REVENUE_SHEET_NAME, and share sheet with service account as Editor)',
+      );
+    });
 }
 
 const app = express();
@@ -52,6 +65,9 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), (req, res
 
   const eventType = event.type || '';
   const obj = event.data?.object || {};
+  // Revenue sheet: always try (independent of Discord so payments still log if Discord fails)
+  appendToRevenueSheet(buildStripeRevenueRow(eventType, obj));
+
   const stripeFailed = STRIPE_FAILURE_EVENTS.has(eventType);
   const webhookUrl = (
     stripeFailed ? process.env.DISCORD_WEBHOOK_FAILED_PAYMENTS : process.env.DISCORD_WEBHOOK_NEW_PAYMENTS
@@ -73,7 +89,6 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), (req, res
   sendEmbed(webhookUrl, embed)
     .then(() => {
       console.log(`[Stripe] Report sent to Discord: ${eventType}`);
-      appendToRevenueSheet(buildStripeRevenueRow(eventType, obj));
       res.status(200).json({ received: true });
     })
     .catch((err) => {
@@ -84,8 +99,57 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), (req, res
 
 app.use(express.json());
 
+/** Append one test row to Revenue tab (debug sharing + REVENUE_SHEET_ID / REVENUE_SHEET_NAME). */
+app.get('/revenue/test', async (_req, res) => {
+  const sheetId = (process.env.REVENUE_SHEET_ID || '').trim();
+  const sheetName = (process.env.REVENUE_SHEET_NAME || '').trim() || 'Revenue';
+  if (!sheetId) {
+    res.status(400).json({
+      success: false,
+      error: 'REVENUE_SHEET_ID not set. Add it in Railway with the spreadsheet ID from the sheet URL.',
+    });
+    return;
+  }
+  const row = buildRevenueRow({
+    dueDate: new Date().toISOString().slice(0, 10),
+    clientName: 'Revenue test (bsmbot)',
+    email: 'test@example.com',
+    offer: 'Manual /revenue/test',
+    cashCollected: '1.00',
+    contracted: '1.00',
+    instalment: '',
+    status: 'Test',
+    paymentMethod: '—',
+    platform: 'Health check',
+    commissionPct: '',
+    payout: '',
+  });
+  try {
+    await appendRows(sheetId, sheetName, [row]);
+    res.json({
+      success: true,
+      message: `Appended 1 row to tab "${sheetName}". Scroll to the bottom of that tab in Google Sheets.`,
+      sheetIdPreview: `${sheetId.slice(0, 12)}…`,
+    });
+  } catch (err) {
+    const detail = err.response?.data;
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      google: detail || undefined,
+      hint:
+        'Share the spreadsheet with your GOOGLE_SERVICE_ACCOUNT_EMAIL as Editor. Tab name must match REVENUE_SHEET_NAME exactly.',
+    });
+  }
+});
+
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime(), forms: FORMS.length });
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    forms: FORMS.length,
+    revenueSheetConfigured: Boolean((process.env.REVENUE_SHEET_ID || '').trim()),
+  });
 });
 
 app.post('/typeform/webhook', (req, res) => {
@@ -391,11 +455,11 @@ app.post('/whop/webhook', (req, res) => {
   }
 
   const embed = buildWhopPaymentEmbed(event, data);
+  appendToRevenueSheet(buildWhopRevenueRow(event, data));
 
   sendEmbed(webhookUrl, embed)
     .then(() => {
       console.log(`[WHOP] Report sent to Discord: ${event}`);
-      appendToRevenueSheet(buildWhopRevenueRow(event, data));
       res.status(200).json({ success: true });
     })
     .catch((err) => {
