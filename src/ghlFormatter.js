@@ -89,16 +89,46 @@ const OPPORTUNITY_STAGES = {
 };
 
 /**
+ * GHL workflow webhooks vary: contact may be object, array, nested under opportunity, or flat on body.
+ */
+function extractGhlContact(body) {
+  const b = body || {};
+  let c = b.contact;
+  if (Array.isArray(c) && c.length > 0) c = c[0];
+  if (c && typeof c === 'object') return c;
+  if (b.attributionContact && typeof b.attributionContact === 'object') return b.attributionContact;
+  if (b.lead && typeof b.lead === 'object') return b.lead;
+  const opp = b.opportunity;
+  if (opp?.contact && typeof opp.contact === 'object') {
+    let oc = opp.contact;
+    if (Array.isArray(oc) && oc[0]) oc = oc[0];
+    return oc;
+  }
+  return b;
+}
+
+/**
  * Build embed for opportunity pipeline stage (No show, Follow up, Closed deal).
  * stageKey: 'no_show' | 'follow_up' | 'closed_deal'
  */
 function buildGhlOpportunityEmbed(stageKey, body) {
   const stage = OPPORTUNITY_STAGES[stageKey] || { label: stageKey, color: 0x3498db };
 
-  const contact = body.contact || body;
-  const name = [contact.firstName, contact.lastName].filter(Boolean).join(' ') || contact.name || contact.fullName || '—';
-  const email = contact.email || body.email || '—';
-  const phone = contact.phone || contact.phoneNumber || body.phone || '—';
+  const contact = extractGhlContact(body);
+  const name =
+    [contact.firstName, contact.lastName].filter(Boolean).join(' ') ||
+    contact.name ||
+    contact.fullName ||
+    contact.displayName ||
+    '—';
+  const email = contact.email || body.email || contact.emailAddress || '—';
+  const phone =
+    contact.phone ||
+    contact.phoneNumber ||
+    contact.phone_number ||
+    body.phone ||
+    body.phoneNumber ||
+    '—';
 
   const fields = [
     { name: 'Stage', value: stage.label, inline: true },
@@ -106,6 +136,17 @@ function buildGhlOpportunityEmbed(stageKey, body) {
     { name: 'Email', value: String(email).slice(0, 1024) || '—', inline: true },
     { name: 'Phone', value: String(phone).slice(0, 1024) || '—', inline: true },
   ];
+
+  const opp = body.opportunity;
+  if (opp && typeof opp === 'object') {
+    if (opp.name) fields.push({ name: 'Opportunity', value: String(opp.name).slice(0, 1024), inline: false });
+    if (opp.monetaryValue != null && opp.monetaryValue !== '')
+      fields.push({ name: 'Value', value: String(opp.monetaryValue), inline: true });
+    if (opp.pipelineStageName || opp.pipeline_stage_name) {
+      const ps = opp.pipelineStageName || opp.pipeline_stage_name;
+      fields.push({ name: 'Pipeline stage', value: String(ps).slice(0, 1024), inline: true });
+    }
+  }
 
   const skip = new Set([
     'contact', 'opportunity', 'stage', 'stageName', 'pipelineStage', 'pipeline_stage', 'pipelineStageId', 'status',
@@ -129,4 +170,9 @@ function buildGhlOpportunityEmbed(stageKey, body) {
   };
 }
 
-module.exports = { buildGhlBookedCallEmbed, buildGhlWorkflowEmbed, buildGhlOpportunityEmbed };
+module.exports = {
+  buildGhlBookedCallEmbed,
+  buildGhlWorkflowEmbed,
+  buildGhlOpportunityEmbed,
+  extractGhlContact,
+};

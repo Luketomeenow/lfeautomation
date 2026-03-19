@@ -169,7 +169,10 @@ const OPPORTUNITY_WEBHOOKS = {
 
 function normalizePipelineStage(value) {
   if (value == null || value === '') return null;
-  const v = String(value).toLowerCase().replace(/[\s-]/g, '_');
+  const s = String(value).trim();
+  // Ignore UUIDs / long IDs so we don't mis-route on random fields
+  if (/^[0-9a-f-]{36}$/i.test(s) || /^[a-z0-9]{20,}$/i.test(s)) return null;
+  const v = s.toLowerCase().replace(/[\s-]/g, '_');
   if (v.includes('no_show') || v.includes('noshow') || v === 'no_show') return 'no_show';
   if (v.includes('follow') || v.includes('followup') || v === 'follow_up') return 'follow_up';
   if (v.includes('closed') || v.includes('deal') || v === 'closed_deal') return 'closed_deal';
@@ -184,25 +187,80 @@ function getOpportunityStage(body) {
     b.stage ??
     b.stageName ??
     b.pipelineStage ??
+    b.pipelineStageName ??
+    b.pipeline_stage_name ??
+    b.toStage ??
+    b.to_stage ??
+    b.newStage ??
+    b.new_stage ??
     b.status ??
     b.pipeline_stage ??
     opportunity.stageName ??
     opportunity.stage ??
+    opportunity.pipelineStageName ??
+    opportunity.pipeline_stage_name ??
     opportunity.status ??
+    opportunity.title ??
     custom.stage ??
     custom.stageName ??
+    custom.pipelineStage ??
+    b['Pipeline Stage'] ??
+    b['To Stage'] ??
     ''
   );
 }
 
+/** If known keys miss, scan shallow string fields (GHL custom data often lands here). */
+function inferStageKeyFromBody(body) {
+  const rawPrimary = getOpportunityStage(body);
+  const primaryKey =
+    rawPrimary != null && rawPrimary !== '' ? normalizePipelineStage(String(rawPrimary)) : null;
+  if (primaryKey) return { stageKey: primaryKey, stageRaw: rawPrimary };
+
+  const tryVal = (val) => {
+    if (val == null || typeof val !== 'string') return null;
+    const t = val.trim();
+    if (t.length === 0 || t.length > 120) return null;
+    return normalizePipelineStage(t);
+  };
+
+  const b = body || {};
+  for (const val of Object.values(b)) {
+    const k = tryVal(typeof val === 'string' ? val : null);
+    if (k) return { stageKey: k, stageRaw: val };
+  }
+  const opp = b.opportunity;
+  if (opp && typeof opp === 'object') {
+    for (const val of Object.values(opp)) {
+      const k = tryVal(typeof val === 'string' ? val : null);
+      if (k) return { stageKey: k, stageRaw: val };
+    }
+  }
+  for (const val of Object.values(b.customData || b.custom_data || {})) {
+    const k = tryVal(typeof val === 'string' ? val : null);
+    if (k) return { stageKey: k, stageRaw: val };
+  }
+  return { stageKey: null, stageRaw: getOpportunityStage(body) };
+}
+
 app.post('/ghl/opportunity', (req, res) => {
   const body = req.body || {};
-  const stageRaw = getOpportunityStage(body);
-  const stageKey = normalizePipelineStage(stageRaw);
+  const { stageKey, stageRaw } = inferStageKeyFromBody(body);
 
   if (!stageKey || !OPPORTUNITY_WEBHOOKS[stageKey]) {
-    console.error('[GHL Opportunity] Unknown or missing stage:', stageRaw, '| body keys:', Object.keys(body).join(', '));
-    res.status(200).json({ success: false, error: 'Unknown stage. Use: no_show, follow_up, or closed_deal' });
+    console.error(
+      '[GHL Opportunity] Unknown or missing stage. stageRaw=',
+      JSON.stringify(stageRaw),
+      '| keys:',
+      Object.keys(body).join(', '),
+      '| sample:',
+      JSON.stringify(body).slice(0, 800),
+    );
+    res.status(200).json({
+      success: false,
+      error:
+        'Unknown stage. Add Custom Data in GHL: key "stage" with value "No Show", "Follow Up", or "Closed Deal" (or set pipeline stage name to include those words).',
+    });
     return;
   }
 
@@ -214,6 +272,15 @@ app.post('/ghl/opportunity', (req, res) => {
   }
 
   const embed = buildGhlOpportunityEmbed(stageKey, body);
+  console.log(
+    '[GHL Opportunity] Routing',
+    stageKey,
+    '→ Discord webhook …',
+    webhookUrl.slice(-24),
+    '| fields:',
+    embed.fields?.length,
+  );
+
   sendEmbed(webhookUrl, embed)
     .then(() => {
       console.log('[GHL Opportunity] Sent to Discord:', stageKey);
