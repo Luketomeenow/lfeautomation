@@ -65,8 +65,10 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), (req, res
 
   const eventType = event.type || '';
   const obj = event.data?.object || {};
-  // Revenue sheet: always try (independent of Discord so payments still log if Discord fails)
-  appendToRevenueSheet(buildStripeRevenueRow(eventType, obj));
+  // Revenue sheet: successful payments only (not failed payment events)
+  if (!STRIPE_FAILURE_EVENTS.has(eventType)) {
+    appendToRevenueSheet(buildStripeRevenueRow(eventType, obj));
+  }
 
   const stripeFailed = STRIPE_FAILURE_EVENTS.has(eventType);
   const webhookUrl = (
@@ -455,7 +457,10 @@ app.post('/whop/webhook', (req, res) => {
   }
 
   const embed = buildWhopPaymentEmbed(event, data);
-  appendToRevenueSheet(buildWhopRevenueRow(event, data));
+  // Revenue sheet: successful payments only (not Whop payment.failed)
+  if (event !== 'payment.failed') {
+    appendToRevenueSheet(buildWhopRevenueRow(event, data));
+  }
 
   sendEmbed(webhookUrl, embed)
     .then(() => {
