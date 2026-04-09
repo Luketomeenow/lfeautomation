@@ -1,15 +1,17 @@
+const crypto = require('crypto');
 const express = require('express');
 const { FORMS, POLL_INTERVAL_MS } = require('./config');
 const { getRowCount, getNewRows } = require('./sheets');
 const { sendEmbed } = require('./discord');
-const { buildEmbed } = require('./formatters');
+const { buildSheetEmbed } = require('./formatters');
 const { parsePayload, buildLeadFromParsed } = require('./typeform');
 const { buildNewLeadEmbed } = require('./typeformFormatter');
 const { buildGhlBookedCallEmbed, buildGhlWorkflowEmbed, buildGhlOpportunityEmbed } = require('./ghlFormatter');
 const { buildWhopPaymentEmbed } = require('./whopFormatter');
 const { buildStripePaymentEmbed } = require('./stripeFormatter');
+const { buildFanBasisPaymentEmbed } = require('./fanbasisFormatter');
 const { appendRows } = require('./sheets');
-const { buildWhopRevenueRow, buildStripeRevenueRow, buildRevenueRow } = require('./revenueSheet');
+const { buildWhopRevenueRow, buildStripeRevenueRow, buildFanBasisRevenueRow, buildRevenueRow } = require('./revenueSheet');
 const state = require('./state');
 
 function appendToRevenueSheet(row) {
@@ -42,6 +44,21 @@ const STRIPE_FAILURE_EVENTS = new Set([
   'charge.failed',
   'invoice.payment_failed',
 ]);
+
+const FANBASIS_FAILURE_EVENTS = new Set(['payment.failed', 'subscription.payment_failed']);
+
+function validateFanBasisSignature(rawBuf, signatureHeader, secret) {
+  if (!secret || !signatureHeader) return false;
+  const expected = crypto.createHmac('sha256', secret).update(rawBuf).digest('hex');
+  try {
+    const a = Buffer.from(String(signatureHeader).trim(), 'hex');
+    const b = Buffer.from(expected, 'hex');
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
 
 // Stripe webhook needs raw body for signature verification; register before express.json()
 app.post('/stripe/webhook', express.raw({ type: 'application/json' }), (req, res) => {
@@ -97,6 +114,97 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), (req, res
       console.error('[Stripe] Discord webhook failed:', err.message);
       res.status(200).json({ received: true, error: err.message });
     });
+});
+
+// FanBasis — raw body for HMAC verification (x-webhook-signature). Register webhook URL in FanBasis dashboard.
+app.post('/fanbasis/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  const rawBuf = Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body || ''), 'utf8');
+  const sig = req.headers['x-webhook-signature'];
+  const secret = (process.env.FANBASIS_WEBHOOK_SECRET || '').trim();
+
+  if (secret) {
+    if (!validateFanBasisSignature(rawBuf, sig, secret)) {
+      console.error('[FanBasis] Invalid webhook signature (check FANBASIS_WEBHOOK_SECRET)');
+      res.status(401).send('Invalid signature');
+      return;
+    }
+  } else {
+    console.warn('[FanBasis] FANBASIS_WEBHOOK_SECRET not set — signature not verified');
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(rawBuf.toString('utf8'));
+  } catch (err) {
+    res.status(400).json({ error: 'Invalid JSON' });
+    return;
+  }
+
+  let eventType = parsed.type ?? parsed.event_type ?? parsed.event ?? '';
+  const data = parsed.data != null ? parsed.data : parsed;
+
+  if (!eventType && data.status === 'paid') eventType = 'payment.succeeded';
+  if (!eventType && data.status === 'failed') eventType = 'payment.failed';
+
+  if (!eventType) {
+    console.error('[FanBasis] Missing event type:', JSON.stringify(parsed).slice(0, 500));
+    res.status(200).json({ received: true, error: 'Missing event type' });
+    return;
+  }
+
+  if (eventType === 'payment.succeeded') {
+    appendToRevenueSheet(buildFanBasisRevenueRow(data));
+  }
+
+  const fanbasisFailed = FANBASIS_FAILURE_EVENTS.has(eventType);
+  const webhookUrl = (
+    fanbasisFailed
+      ? process.env.DISCORD_WEBHOOK_FAILED_PAYMENTS
+      : (process.env.DISCORD_WEBHOOK_FANBASIS || process.env.DISCORD_WEBHOOK_NEW_PAYMENTS)
+  ).trim();
+
+  if (!webhookUrl) {
+    console.error(
+      fanbasisFailed
+        ? '[FanBasis] DISCORD_WEBHOOK_FAILED_PAYMENTS not set'
+        : '[FanBasis] DISCORD_WEBHOOK_FANBASIS or DISCORD_WEBHOOK_NEW_PAYMENTS not set',
+    );
+    res.status(200).json({ received: true, error: 'Discord webhook not configured' });
+    return;
+  }
+
+  const embed = buildFanBasisPaymentEmbed(eventType, data);
+
+  sendEmbed(webhookUrl, embed)
+    .then(() => {
+      console.log(`[FanBasis] Report sent to Discord: ${eventType}`);
+      res.status(200).json({ received: true });
+    })
+    .catch((err) => {
+      console.error('[FanBasis] Discord webhook failed:', err.message);
+      res.status(200).json({ received: true, error: err.message });
+    });
+});
+
+app.get('/fanbasis/test', (_req, res) => {
+  const webhookUrl = (process.env.DISCORD_WEBHOOK_FANBASIS || process.env.DISCORD_WEBHOOK_NEW_PAYMENTS || '').trim();
+  if (!webhookUrl) {
+    res.json({ error: 'Set DISCORD_WEBHOOK_FANBASIS or DISCORD_WEBHOOK_NEW_PAYMENTS' });
+    return;
+  }
+  const embed = buildFanBasisPaymentEmbed('payment.succeeded', {
+    payment_id: 'txn_test',
+    amount: 2900,
+    currency: 'USD',
+    status: 'paid',
+    buyer: { name: 'Test Customer', email: 'test@example.com' },
+    item: { name: 'Test Product', type: 'one_time' },
+    payment_method: 'card',
+  });
+  embed.title = `🧪 Test – ${embed.title}`;
+  sendEmbed(webhookUrl, embed)
+    .then(() => res.json({ success: true, message: 'Test FanBasis embed sent to Discord' }))
+    .catch((err) => res.json({ success: false, error: err.message }));
 });
 
 app.use(express.json());
@@ -597,7 +705,7 @@ async function pollForm(form, savedState) {
   let sent = 0;
   for (const row of newRows) {
     try {
-      const embed = buildEmbed(form, headers, row);
+      const embed = buildSheetEmbed(form, headers, row);
       await sendEmbed(form.webhookUrl, embed);
       sent++;
       // Small delay between messages to respect Discord rate limits

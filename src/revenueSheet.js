@@ -138,4 +138,34 @@ function buildStripeRevenueRow(eventType, obj) {
   });
 }
 
-module.exports = { buildRevenueRow, buildWhopRevenueRow, buildStripeRevenueRow };
+/**
+ * FanBasis payment.succeeded payload — amount usually in cents (see FanBasis API docs).
+ */
+function buildFanBasisRevenueRow(data) {
+  const d = data || {};
+  const buyer = d.buyer || {};
+  const item = d.item || {};
+  const clientName = buyer.name ?? '';
+  const email = buyer.email ?? '';
+  const offer = item.name ?? item.title ?? '';
+  const amount = d.amount;
+  const isLikelyCents = typeof amount === 'number' && (Math.abs(amount) >= 100 || Number.isInteger(amount));
+  const cashCollected = amount != null ? numToDollars(amount, isLikelyCents) : '';
+
+  return buildRevenueRow({
+    dueDate: toDateStr(d.created_at ?? new Date()),
+    clientName: safe(clientName),
+    email: safe(email),
+    offer: safe(offer),
+    cashCollected,
+    contracted: cashCollected,
+    instalment: '',
+    status: 'Paid',
+    paymentMethod: safe(d.payment_method || 'Card'),
+    platform: 'FanBasis',
+    commissionPct: '',
+    payout: '',
+  });
+}
+
+module.exports = { buildRevenueRow, buildWhopRevenueRow, buildStripeRevenueRow, buildFanBasisRevenueRow };
