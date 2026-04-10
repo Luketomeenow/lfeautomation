@@ -8,7 +8,7 @@ const { parsePayload, buildLeadFromParsed } = require('./typeform');
 const { buildNewLeadEmbed } = require('./typeformFormatter');
 const { buildGhlBookedCallEmbed, buildGhlWorkflowEmbed, buildGhlOpportunityEmbed } = require('./ghlFormatter');
 const { buildWhopPaymentEmbed } = require('./whopFormatter');
-const { buildStripePaymentEmbed } = require('./stripeFormatter');
+const { buildStripePaymentEmbed, buildStripeLowTicketLeadEmbed, isStripeLowTicketPayment } = require('./stripeFormatter');
 const { buildFanBasisPaymentEmbed } = require('./fanbasisFormatter');
 const { appendRows } = require('./sheets');
 const { buildWhopRevenueRow, buildStripeRevenueRow, buildFanBasisRevenueRow, buildRevenueRow } = require('./revenueSheet');
@@ -108,6 +108,15 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), (req, res
   sendEmbed(webhookUrl, embed)
     .then(() => {
       console.log(`[Stripe] Report sent to Discord: ${eventType}`);
+      const leadUrl = (process.env.DISCORD_WEBHOOK_NEW_LEAD || '').trim();
+      if (!stripeFailed && leadUrl && isStripeLowTicketPayment(eventType, obj)) {
+        const leadEmbed = buildStripeLowTicketLeadEmbed(eventType, obj);
+        return sendEmbed(leadUrl, leadEmbed).then(() => {
+          console.log('[Stripe] Low ticket copy sent to New leads');
+        });
+      }
+    })
+    .then(() => {
       res.status(200).json({ received: true });
     })
     .catch((err) => {

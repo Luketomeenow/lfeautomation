@@ -42,6 +42,76 @@ function getEmail(obj) {
 }
 
 /**
+ * Customer display name from Stripe object (billing_details, shipping, invoice).
+ */
+function getCustomerName(obj) {
+  if (!obj) return '—';
+  const b = obj.billing_details;
+  if (b?.name && String(b.name).trim()) return String(b.name).trim();
+  if (obj.shipping?.name && String(obj.shipping.name).trim()) return String(obj.shipping.name).trim();
+  if (obj.customer_name && String(obj.customer_name).trim()) return String(obj.customer_name).trim();
+  if (obj.metadata?.customer_name) return String(obj.metadata.customer_name).trim();
+  if (obj.metadata?.name) return String(obj.metadata.name).trim();
+  return '—';
+}
+
+const STRIPE_SUCCESS_PAYMENT_TYPES = new Set([
+  'payment_intent.succeeded',
+  'charge.succeeded',
+  'invoice.paid',
+]);
+
+function getAmountCents(obj) {
+  const o = obj || {};
+  const amount = o.amount ?? o.amount_paid ?? o.amount_received ?? o.total;
+  if (amount == null) return null;
+  const n = Number(amount);
+  return Number.isNaN(n) ? null : n;
+}
+
+/**
+ * True if this is a successful payment at or below STRIPE_LOW_TICKET_MAX_CENTS (default $50.00).
+ */
+function isStripeLowTicketPayment(eventType, obj) {
+  if (!STRIPE_SUCCESS_PAYMENT_TYPES.has(eventType)) return false;
+  const maxCents = parseInt(process.env.STRIPE_LOW_TICKET_MAX_CENTS || '5000', 10);
+  const cents = getAmountCents(obj);
+  if (cents == null || cents <= 0) return false;
+  return cents <= maxCents;
+}
+
+/**
+ * Embed for #new-lead: name + email first, then amount and context.
+ */
+function buildStripeLowTicketLeadEmbed(eventType, obj) {
+  const o = obj || {};
+  const name = safe(getCustomerName(o));
+  const email = safe(getEmail(o));
+  const currency = (o.currency || 'usd').toLowerCase();
+  const amountStr = formatAmount(getAmountCents(o), currency);
+  const id = o.id ? truncate(o.id, 64) : '—';
+
+  const fields = [
+    { name: 'Name', value: truncate(name), inline: true },
+    { name: 'Email', value: truncate(email), inline: true },
+    { name: 'Amount', value: amountStr, inline: true },
+    { name: 'Status', value: safe(o.status || 'succeeded'), inline: true },
+    { name: 'Payment ID', value: id, inline: false },
+  ];
+  if (o.description) {
+    fields.push({ name: 'Description', value: truncate(o.description), inline: false });
+  }
+
+  return {
+    title: '💰 Low ticket · New lead (Stripe)',
+    color: 0x3498db,
+    fields,
+    footer: { text: 'BSM Bot · Stripe → New leads' },
+    timestamp: new Date().toISOString(),
+  };
+}
+
+/**
  * Build Discord embed from a Stripe event (event.type + event.data.object).
  */
 function buildStripePaymentEmbed(eventType, obj) {
@@ -51,6 +121,7 @@ function buildStripePaymentEmbed(eventType, obj) {
   let amount = o.amount ?? o.amount_paid ?? o.amount_received ?? o.total;
   const currency = (o.currency || 'usd').toLowerCase();
   const amountStr = formatAmount(amount, currency);
+  const name = safe(getCustomerName(o));
   const email = safe(getEmail(o));
   const id = o.id ? truncate(o.id, 64) : '—';
   const status = safe(o.status);
@@ -58,6 +129,7 @@ function buildStripePaymentEmbed(eventType, obj) {
   const fields = [
     { name: 'Amount', value: amountStr, inline: true },
     { name: 'Status', value: status, inline: true },
+    { name: 'Name', value: truncate(name), inline: true },
     { name: 'Email', value: truncate(email), inline: true },
     { name: 'ID', value: id, inline: false },
   ];
@@ -85,4 +157,11 @@ function buildStripePaymentEmbed(eventType, obj) {
   };
 }
 
-module.exports = { buildStripePaymentEmbed, formatAmount };
+module.exports = {
+  buildStripePaymentEmbed,
+  buildStripeLowTicketLeadEmbed,
+  formatAmount,
+  getCustomerName,
+  getEmail,
+  isStripeLowTicketPayment,
+};
