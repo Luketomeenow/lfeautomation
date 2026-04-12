@@ -88,6 +88,70 @@ const OPPORTUNITY_STAGES = {
   closed_deal: { label: 'Closed deal', color: 0x2ecc71 },
 };
 
+/** Normalize object keys for skip matching (Contact_id → contactid). */
+function normOppKey(k) {
+  return String(k || '')
+    .toLowerCase()
+    .replace(/[\s_-]/g, '');
+}
+
+/** Keys we never show on pipeline embeds (IDs / internal noise). */
+const OPPORTUNITY_SKIPPED_KEYS = new Set([
+  'contact',
+  'opportunity',
+  'stage',
+  'stagename',
+  'pipelinestage',
+  'pipelinestageid',
+  'pipelinestage',
+  'status',
+  'firstname',
+  'lastname',
+  'name',
+  'fullname',
+  'displayname',
+  'email',
+  'phone',
+  'phonenumber',
+  'customdata',
+  'custom_data',
+  'contactid',
+  'contacttype',
+  'opportunitysource',
+  'pipelineid',
+  'id',
+  'opportunityid',
+  'calendarid',
+  'userid',
+  'locationid', // shown implicitly via link; still in payload
+]);
+
+function shouldSkipOpportunityField(key) {
+  const n = normOppKey(key);
+  if (OPPORTUNITY_SKIPPED_KEYS.has(n)) return true;
+  if (n === 'pipelineid' || n.endsWith('pipelineid')) return true;
+  if (n.endsWith('contactid') && n !== 'contactsource') return true;
+  return false;
+}
+
+/**
+ * GHL CRM contact page (location + contact id required).
+ * @see https://app.gohighlevel.com — path pattern may vary by account region.
+ */
+function buildGhlContactDetailUrl(contactId, locationId) {
+  if (!contactId || !locationId) return null;
+  const cid = encodeURIComponent(String(contactId).trim());
+  const lid = encodeURIComponent(String(locationId).trim());
+  return `https://app.gohighlevel.com/v2/location/${lid}/contacts/detail/${cid}`;
+}
+
+function linkLabelForDiscord(name) {
+  return String(name || '—')
+    .replace(/[\[\]()]/g, '')
+    .trim()
+    .slice(0, 200);
+}
+
 /**
  * GHL workflow webhooks vary: contact may be object, array, nested under opportunity, or flat on body.
  */
@@ -120,7 +184,30 @@ function buildGhlOpportunityEmbed(stageKey, body) {
     contact.name ||
     contact.fullName ||
     contact.displayName ||
+    body.full_name ||
+    body.fullName ||
     '—';
+
+  const contactId =
+    contact.id ||
+    contact.contactId ||
+    body.contact_id ||
+    body.contactId ||
+    body.Contact_id;
+  const locationId =
+    (process.env.GHL_LOCATION_ID || '').trim() ||
+    body.locationId ||
+    body.location_id ||
+    body.LocationId ||
+    contact.locationId;
+
+  const ghlUrl = buildGhlContactDetailUrl(contactId, locationId);
+  const label = linkLabelForDiscord(name === '—' ? '' : name);
+  let nameFieldValue = String(name).slice(0, 1024) || '—';
+  if (ghlUrl && label && label !== '—') {
+    nameFieldValue = `[${label}](${ghlUrl})`.slice(0, 1024);
+  }
+
   const email = contact.email || body.email || contact.emailAddress || '—';
   const phone =
     contact.phone ||
@@ -132,7 +219,7 @@ function buildGhlOpportunityEmbed(stageKey, body) {
 
   const fields = [
     { name: 'Stage', value: stage.label, inline: true },
-    { name: 'Name', value: String(name).slice(0, 1024) || '—', inline: true },
+    { name: 'Name', value: nameFieldValue, inline: true },
     { name: 'Email', value: String(email).slice(0, 1024) || '—', inline: true },
     { name: 'Phone', value: String(phone).slice(0, 1024) || '—', inline: true },
   ];
@@ -148,16 +235,13 @@ function buildGhlOpportunityEmbed(stageKey, body) {
     }
   }
 
-  const skip = new Set([
-    'contact', 'opportunity', 'stage', 'stageName', 'pipelineStage', 'pipeline_stage', 'pipelineStageId', 'status',
-    'firstName', 'lastName', 'name', 'fullName', 'email', 'phone', 'phoneNumber', 'customData', 'custom_data',
-  ]);
   for (const [key, value] of Object.entries(body)) {
-    if (skip.has(key) || value == null || typeof value === 'object') continue;
+    if (shouldSkipOpportunityField(key)) continue;
+    if (value == null || typeof value === 'object') continue;
     const str = String(value).trim();
     if (str.length > 0 && str.length < 1024) {
-      const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase());
-      fields.push({ name: label, value: str, inline: true });
+      const labelKey = key.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase());
+      fields.push({ name: labelKey, value: str, inline: true });
     }
   }
 
