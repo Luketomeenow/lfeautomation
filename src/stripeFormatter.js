@@ -42,17 +42,54 @@ function getEmail(obj) {
 }
 
 /**
- * Customer display name from Stripe object (billing_details, shipping, invoice).
+ * Customer display name from Stripe PaymentIntent, Charge, or Invoice.
+ * Stripe often leaves PI.billing_details.name empty; the Charge under charges.data[0] may have it.
  */
 function getCustomerName(obj) {
   if (!obj) return '—';
-  const b = obj.billing_details;
-  if (b?.name && String(b.name).trim()) return String(b.name).trim();
-  if (obj.shipping?.name && String(obj.shipping.name).trim()) return String(obj.shipping.name).trim();
-  if (obj.customer_name && String(obj.customer_name).trim()) return String(obj.customer_name).trim();
-  if (obj.metadata?.customer_name) return String(obj.metadata.customer_name).trim();
-  if (obj.metadata?.name) return String(obj.metadata.name).trim();
-  return '—';
+
+  const push = (v) => {
+    if (v == null) return null;
+    const s = String(v).trim();
+    return s.length > 0 ? s : null;
+  };
+
+  const tryBilling = (o) => push(o?.billing_details?.name);
+
+  const md = obj.metadata || {};
+  const fromMeta =
+    push(md.customer_name) ||
+    push(md.full_name) ||
+    push(md.billing_name) ||
+    push(md.name) ||
+    push([md.first_name, md.last_name].filter(Boolean).join(' '));
+
+  const fromCharges =
+    Array.isArray(obj.charges?.data) && obj.charges.data.length > 0
+      ? tryBilling(obj.charges.data[0]) || push(obj.charges.data[0]?.shipping?.name)
+      : null;
+
+  const latest =
+    typeof obj.latest_charge === 'object' && obj.latest_charge
+      ? tryBilling(obj.latest_charge) || push(obj.latest_charge?.shipping?.name)
+      : null;
+
+  const expandedCustomer =
+    typeof obj.customer === 'object' && obj.customer && !Array.isArray(obj.customer)
+      ? push(obj.customer.name)
+      : null;
+
+  return (
+    tryBilling(obj) ||
+    push(obj.shipping?.name) ||
+    push(obj.customer_name) ||
+    fromMeta ||
+    fromCharges ||
+    latest ||
+    expandedCustomer ||
+    tryBilling(obj.payment_method_details) ||
+    '—'
+  );
 }
 
 const STRIPE_SUCCESS_PAYMENT_TYPES = new Set([
@@ -89,14 +126,12 @@ function buildStripeLowTicketLeadEmbed(eventType, obj) {
   const email = safe(getEmail(o));
   const currency = (o.currency || 'usd').toLowerCase();
   const amountStr = formatAmount(getAmountCents(o), currency);
-  const id = o.id ? truncate(o.id, 64) : '—';
 
   const fields = [
     { name: 'Name', value: truncate(name), inline: true },
     { name: 'Email', value: truncate(email), inline: true },
     { name: 'Amount', value: amountStr, inline: true },
     { name: 'Status', value: safe(o.status || 'succeeded'), inline: true },
-    { name: 'Payment ID', value: id, inline: false },
   ];
   if (o.description) {
     fields.push({ name: 'Description', value: truncate(o.description), inline: false });
@@ -123,7 +158,6 @@ function buildStripePaymentEmbed(eventType, obj) {
   const amountStr = formatAmount(amount, currency);
   const name = safe(getCustomerName(o));
   const email = safe(getEmail(o));
-  const id = o.id ? truncate(o.id, 64) : '—';
   const status = safe(o.status);
 
   const fields = [
@@ -131,7 +165,6 @@ function buildStripePaymentEmbed(eventType, obj) {
     { name: 'Status', value: status, inline: true },
     { name: 'Name', value: truncate(name), inline: true },
     { name: 'Email', value: truncate(email), inline: true },
-    { name: 'ID', value: id, inline: false },
   ];
 
   if (o.description) {
@@ -148,11 +181,14 @@ function buildStripePaymentEmbed(eventType, obj) {
     fields.push({ name: 'Line', value: truncate(desc, 256), inline: false });
   }
 
+  const idShort = o.id ? String(o.id).slice(-12) : '';
+  const footerText = idShort ? `BSM Bot · Stripe · …${idShort}` : 'BSM Bot · Stripe';
+
   return {
     title: `${config.emoji} ${config.title}`,
     color: config.color,
     fields,
-    footer: { text: 'BSM Bot · Stripe' },
+    footer: { text: footerText },
     timestamp: new Date().toISOString(),
   };
 }
