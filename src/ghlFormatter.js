@@ -142,7 +142,8 @@ function buildGhlContactDetailUrl(contactId, locationId) {
   if (!contactId || !locationId) return null;
   const cid = encodeURIComponent(String(contactId).trim());
   const lid = encodeURIComponent(String(locationId).trim());
-  return `https://app.gohighlevel.com/v2/location/${lid}/contacts/detail/${cid}`;
+  const base = (process.env.GHL_APP_BASE_URL || 'https://app.gohighlevel.com').replace(/\/$/, '');
+  return `${base}/v2/location/${lid}/contacts/detail/${cid}`;
 }
 
 function linkLabelForDiscord(name) {
@@ -203,10 +204,11 @@ function buildGhlOpportunityEmbed(stageKey, body) {
 
   const ghlUrl = buildGhlContactDetailUrl(contactId, locationId);
   const label = linkLabelForDiscord(name === '—' ? '' : name);
-  let nameFieldValue = String(name).slice(0, 1024) || '—';
-  if (ghlUrl && label && label !== '—') {
-    nameFieldValue = `[${label}](${ghlUrl})`.slice(0, 1024);
-  }
+  // Discord does not render [text](url) as clickable inside embed *field values* — only in description.
+  const nameLinkedInDescription = Boolean(ghlUrl && label && label !== '—');
+  const description = nameLinkedInDescription
+    ? `**Name:** [${label}](${ghlUrl})`.slice(0, 4096)
+    : null;
 
   const email = contact.email || body.email || contact.emailAddress || '—';
   const phone =
@@ -219,7 +221,9 @@ function buildGhlOpportunityEmbed(stageKey, body) {
 
   const fields = [
     { name: 'Stage', value: stage.label, inline: true },
-    { name: 'Name', value: nameFieldValue, inline: true },
+    ...(nameLinkedInDescription
+      ? []
+      : [{ name: 'Name', value: String(name).slice(0, 1024) || '—', inline: true }]),
     { name: 'Email', value: String(email).slice(0, 1024) || '—', inline: true },
     { name: 'Phone', value: String(phone).slice(0, 1024) || '—', inline: true },
   ];
@@ -247,6 +251,7 @@ function buildGhlOpportunityEmbed(stageKey, body) {
 
   return {
     title: `📌 Pipeline: ${stage.label}`,
+    description,
     color: stage.color,
     fields,
     footer: { text: 'BSM Bot · Opportunity Pipeline' },
