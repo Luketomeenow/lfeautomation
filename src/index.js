@@ -9,7 +9,7 @@ const { buildNewLeadEmbed } = require('./typeformFormatter');
 const { buildGhlBookedCallEmbed, buildGhlWorkflowEmbed, buildGhlOpportunityEmbed } = require('./ghlFormatter');
 const { buildWhopPaymentEmbed } = require('./whopFormatter');
 const { buildStripePaymentEmbed, buildStripeLowTicketLeadEmbed, isStripeLowTicketPayment } = require('./stripeFormatter');
-const { buildFanBasisPaymentEmbed } = require('./fanbasisFormatter');
+const { buildFanBasisPaymentEmbed, extractFanBasisPayload } = require('./fanbasisFormatter');
 const { appendRows } = require('./sheets');
 const { buildWhopRevenueRow, buildStripeRevenueRow, buildFanBasisRevenueRow, buildRevenueRow } = require('./revenueSheet');
 const state = require('./state');
@@ -125,10 +125,13 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), (req, res
     });
 });
 
-// FanBasis — raw body for HMAC verification (x-webhook-signature). Register webhook URL in FanBasis dashboard.
+// FanBasis — raw body for HMAC verification. Register webhook URL in FanBasis dashboard.
 app.post('/fanbasis/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   const rawBuf = Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body || ''), 'utf8');
-  const sig = req.headers['x-webhook-signature'];
+  const sig =
+    req.headers['x-webhook-signature'] ||
+    req.headers['x-fanbasis-signature'] ||
+    req.headers['x-webhooks-signature'];
   const secret = (process.env.FANBASIS_WEBHOOK_SECRET || '').trim();
 
   if (secret) {
@@ -149,11 +152,7 @@ app.post('/fanbasis/webhook', express.raw({ type: 'application/json' }), (req, r
     return;
   }
 
-  let eventType = parsed.type ?? parsed.event_type ?? parsed.event ?? '';
-  const data = parsed.data != null ? parsed.data : parsed;
-
-  if (!eventType && data.status === 'paid') eventType = 'payment.succeeded';
-  if (!eventType && data.status === 'failed') eventType = 'payment.failed';
+  const { eventType, data } = extractFanBasisPayload(parsed);
 
   if (!eventType) {
     console.error('[FanBasis] Missing event type:', JSON.stringify(parsed).slice(0, 500));

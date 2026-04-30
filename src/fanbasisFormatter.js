@@ -3,6 +3,40 @@
  * Docs: https://apidocs.fan/ — amounts often in cents; buyer/item shapes vary slightly.
  */
 
+/**
+ * FanBasis may POST `{ type, data }` OR a flat payment object. Merge so buyer/item are never lost.
+ */
+function extractFanBasisPayload(parsed) {
+  const p = parsed || {};
+  const inner = p.data != null && typeof p.data === 'object' ? p.data : {};
+  const merged = { ...p, ...inner };
+  delete merged.type;
+  delete merged.event_type;
+  delete merged.eventType;
+  delete merged.event;
+  delete merged.data;
+
+  let eventType =
+    p.type ??
+    p.event_type ??
+    p.eventType ??
+    p.event ??
+    '';
+
+  if (eventType) {
+    const e = String(eventType).toLowerCase().replace(/_/g, '.').trim();
+    if (e === 'payment.succeeded') eventType = 'payment.succeeded';
+    else if (e === 'payment.failed') eventType = 'payment.failed';
+    else if (e === 'subscription.payment.failed') eventType = 'subscription.payment_failed';
+    else eventType = String(eventType).trim();
+  }
+
+  if (!eventType && merged.status === 'paid') eventType = 'payment.succeeded';
+  if (!eventType && merged.status === 'failed') eventType = 'payment.failed';
+
+  return { eventType: String(eventType || '').trim(), data: merged };
+}
+
 function formatMoney(amount, currency) {
   if (amount == null) return '—';
   const num = Number(amount);
@@ -63,4 +97,4 @@ function buildFanBasisPaymentEmbed(eventType, data) {
   };
 }
 
-module.exports = { buildFanBasisPaymentEmbed, formatMoney };
+module.exports = { buildFanBasisPaymentEmbed, formatMoney, extractFanBasisPayload };
